@@ -48,10 +48,10 @@ def drain_sock(sock: SubSocket, wait_for_one: bool = False) -> List[capnp.lib.ca
   return [log_from_bytes(m) for m in msgs]
 
 
-# TODO: print when we drop packets?
 def recv_sock(sock: SubSocket, wait: bool = False) -> Optional[capnp.lib.capnp._DynamicStructReader]:
   """Same as drain sock, but only returns latest message. Consider using conflate instead."""
   dat = None
+  dropped_count = 0
 
   while 1:
     if wait and dat is None:
@@ -62,7 +62,13 @@ def recv_sock(sock: SubSocket, wait: bool = False) -> Optional[capnp.lib.capnp._
     if recv is None:  # Timeout hit
       break
 
+    if dat is not None:
+      dropped_count += 1
+
     dat = recv
+
+  if dropped_count > 0:
+    print(f"Dropped {dropped_count} packets in recv_sock")
 
   if dat is not None:
     dat = log_from_bytes(dat)
