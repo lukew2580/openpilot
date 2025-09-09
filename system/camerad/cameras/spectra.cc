@@ -1093,10 +1093,40 @@ void SpectraCamera::configISP() {
     .length = sizeof(in_port_info),
   };
 
-  auto isp_dev_handle_ = device_acquire(m->isp_fd, session_handle, &isp_resource);
-  assert(isp_dev_handle_);
-  isp_dev_handle = *isp_dev_handle_;
-  LOGD("acquire isp dev");
+  // Try to acquire ISP with fallback on different RDI outputs when in RAW mode.
+  // Some platforms require distinct RDI indices per stream and may fail (-EINVAL) on RDI_0.
+  auto try_acquire_isp = [&](uint32_t rdi_res_type) -> bool {
+    in_port_info.data[0].res_type = rdi_res_type;
+    auto h = device_acquire(m->isp_fd, session_handle, &isp_resource);
+    if (h) {
+      isp_dev_handle = *h;
+      LOGD("acquire isp dev (res %u) ok", rdi_res_type);
+      return true;
+    }
+    LOGE("ISP acquire failed for res %u (camera %d)", rdi_res_type, cc.camera_num);
+    return false;
+  };
+
+  bool isp_ok = false;
+  if (cc.output_type == ISP_IFE_PROCESSED) {
+    auto h = device_acquire(m->isp_fd, session_handle, &isp_resource);
+    if (h) {
+      isp_dev_handle = *h;
+      isp_ok = true;
+      LOGD("acquire isp dev (FULL) ok");
+    }
+  } else {
+    // Try RDI_0, then RDI_1, then RDI_2
+    isp_ok = try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_0) ||
+             try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_1) ||
+             try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_2);
+  }
+
+  if (!isp_ok) {
+    LOGE("camera %d: ISP acquire failed on all outputs, disabling camera", cc.camera_num);
+    enabled = false;
+    return;
+  }
 
   // allocate IFE memory, then configure it
   ife_cmd.init(m, 67984, 0x20, false, m->device_iommu, m->cdm_iommu, ife_buf_depth);
@@ -1188,12 +1218,20 @@ void SpectraCamera::configICP() {
 
 void SpectraCamera::configCSIPHY() {
   csiphy_fd = open_v4l_by_name_and_index("cam-csiphy-driver", cc.camera_num);
-  assert(csiphy_fd >= 0);
+  if (csiphy_fd < 0) {
+    LOGE("opened csiphy failed for %d", cc.camera_num);
+    enabled = false;
+    return;
+  }
   LOGD("opened csiphy for %d", cc.camera_num);
 
   struct cam_csiphy_acquire_dev_info csiphy_acquire_dev_info = {.combo_mode = 0};
   auto csiphy_dev_handle_ = device_acquire(csiphy_fd, session_handle, &csiphy_acquire_dev_info);
-  assert(csiphy_dev_handle_);
+  if (!csiphy_dev_handle_) {
+    LOGE("camera %d: csiphy acquire failed, disabling camera", cc.camera_num);
+    enabled = false;
+    return;
+  }
   csiphy_dev_handle = *csiphy_dev_handle_;
   LOGD("acquire csiphy dev");
 
@@ -1234,7 +1272,11 @@ void SpectraCamera::linkDevices() {
   req_mgr_link_info.dev_hdls[0] = isp_dev_handle;
   req_mgr_link_info.dev_hdls[1] = sensor_dev_handle;
   int ret = do_cam_control(m->video0_fd, CAM_REQ_MGR_LINK, &req_mgr_link_info, sizeof(req_mgr_link_info));
-  assert(ret == 0);
+  if (ret != 0) {
+    LOGE("camera %d: link failed (%d), disabling camera", cc.camera_num, ret);
+    enabled = false;
+    return;
+  }
   link_handle = req_mgr_link_info.link_hdl;
   LOGD("link: %d session: 0x%X isp: 0x%X sensors: 0x%X link: 0x%X", ret, session_handle, isp_dev_handle, sensor_dev_handle, link_handle);
 
@@ -1251,7 +1293,11 @@ void SpectraCamera::linkDevices() {
   assert(ret == 0);
   ret = device_control(m->isp_fd, CAM_START_DEV, session_handle, isp_dev_handle);
   LOGD("start isp: %d", ret);
-  assert(ret == 0);
+  if (ret != 0) {
+    LOGE("camera %d: start isp failed (%d), disabling camera", cc.camera_num, ret);
+    enabled = false;
+    return;
+  }
   if (cc.output_type == ISP_BPS_PROCESSED) {
     ret = device_control(m->icp_fd, CAM_START_DEV, session_handle, icp_dev_handle);
     LOGD("start icp: %d", ret);
