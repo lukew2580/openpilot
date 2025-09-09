@@ -1102,17 +1102,21 @@ void SpectraCamera::configISP() {
   // Try to acquire ISP with fallback on different RDI outputs when in RAW mode.
   // Some platforms require distinct RDI indices per stream and may fail (-EINVAL) on a given RDI.
   auto try_acquire_isp = [&](uint32_t rdi_res_type) -> bool {
-    if (cc.output_type != ISP_IFE_PROCESSED) {
-      in_port_info.data[0].res_type = rdi_res_type;
+    // Retry with short backoff to avoid transient races when multiple cameras acquire concurrently
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      if (cc.output_type != ISP_IFE_PROCESSED) {
+        in_port_info.data[0].res_type = rdi_res_type;
+      }
+      auto h = device_acquire(m->isp_fd, session_handle, &isp_resource);
+      if (h) {
+        isp_dev_handle = *h;
+        LOGD("acquire isp dev (res %u) ok (attempt %d)", rdi_res_type, attempt+1);
+        return true;
+      }
+      LOGW("ISP acquire failed for res %u (camera %d) attempt %d", rdi_res_type, cc.camera_num, attempt+1);
+      util::sleep_for(50 * (attempt + 1));
     }
-    in_port_info.data[0].res_type = rdi_res_type;
-    auto h = device_acquire(m->isp_fd, session_handle, &isp_resource);
-    if (h) {
-      isp_dev_handle = *h;
-      LOGD("acquire isp dev (res %u) ok", rdi_res_type);
-      return true;
-    }
-    LOGE("ISP acquire failed for res %u (camera %d)", rdi_res_type, cc.camera_num);
+    LOGE("ISP acquire failed for res %u (camera %d) after retries", rdi_res_type, cc.camera_num);
     return false;
   };
 
