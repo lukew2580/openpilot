@@ -1041,6 +1041,7 @@ void SpectraCamera::configISP() {
     .lane_num = 4,
     .lane_cfg = 0x3210,
 
+    // Prefer distinct virtual channels if configured; default 0
     .vc = 0x0,
     .dt = sensor->frame_data_type,
     .format = sensor->mipi_format,
@@ -1081,8 +1082,6 @@ void SpectraCamera::configISP() {
     in_port_info.line_start = 0;
     in_port_info.line_stop = sensor->frame_height + sensor->extra_height - 1;
     in_port_info.height = sensor->frame_height + sensor->extra_height;
-
-    in_port_info.data[0].res_type = CAM_ISP_IFE_OUT_RES_RDI_0;
     in_port_info.data[0].format = sensor->mipi_format;
   }
 
@@ -1093,9 +1092,19 @@ void SpectraCamera::configISP() {
     .length = sizeof(in_port_info),
   };
 
+  // Optionally select VC and preferred RDI mapping per camera via env
+  if (const char *vc_env = getenv("SPECTRA_VC"); vc_env && cc.output_type != ISP_IFE_PROCESSED) {
+    int vc = std::clamp(atoi(vc_env), 0, 3);
+    in_port_info.vc = vc;
+    LOGW("camera %d: forcing VC=%d via SPECTRA_VC", cc.camera_num, vc);
+  }
+
   // Try to acquire ISP with fallback on different RDI outputs when in RAW mode.
-  // Some platforms require distinct RDI indices per stream and may fail (-EINVAL) on RDI_0.
+  // Some platforms require distinct RDI indices per stream and may fail (-EINVAL) on a given RDI.
   auto try_acquire_isp = [&](uint32_t rdi_res_type) -> bool {
+    if (cc.output_type != ISP_IFE_PROCESSED) {
+      in_port_info.data[0].res_type = rdi_res_type;
+    }
     in_port_info.data[0].res_type = rdi_res_type;
     auto h = device_acquire(m->isp_fd, session_handle, &isp_resource);
     if (h) {
@@ -1116,10 +1125,22 @@ void SpectraCamera::configISP() {
       LOGD("acquire isp dev (FULL) ok");
     }
   } else {
-    // Try RDI_0, then RDI_1, then RDI_2
-    isp_ok = try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_0) ||
-             try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_1) ||
-             try_acquire_isp(CAM_ISP_IFE_OUT_RES_RDI_2);
+    // Determine preferred RDI: default cam->RDI mapping; allow override via SPECTRA_RDI
+    auto rdi_const = [](int idx) {
+      switch (std::clamp(idx, 0, 2)) {
+        case 0: return (uint32_t)CAM_ISP_IFE_OUT_RES_RDI_0;
+        case 1: return (uint32_t)CAM_ISP_IFE_OUT_RES_RDI_1;
+        default: return (uint32_t)CAM_ISP_IFE_OUT_RES_RDI_2;
+      }
+    };
+    int preferred_idx = std::clamp(cc.camera_num, 0, 2);
+    if (const char *rdi_env = getenv("SPECTRA_RDI"); rdi_env) {
+      preferred_idx = std::clamp(atoi(rdi_env), 0, 2);
+      LOGW("camera %d: forcing preferred RDI_%d via SPECTRA_RDI", cc.camera_num, preferred_idx);
+    }
+
+    uint32_t order[3] = { rdi_const(preferred_idx), rdi_const((preferred_idx+1)%3), rdi_const((preferred_idx+2)%3) };
+    isp_ok = try_acquire_isp(order[0]) || try_acquire_isp(order[1]) || try_acquire_isp(order[2]);
   }
 
   if (!isp_ok) {
