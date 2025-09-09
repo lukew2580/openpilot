@@ -101,7 +101,8 @@ Ignition: {self.simulator_state.ignition} Engaged: {self.simulator_state.is_enga
   def _run(self, q: Queue):
     self.world = self.spawn_world(q)
 
-    self.simulated_car = SimulatedCar()
+    from openpilot.tools.sim.lib.simulated_rivian_car import SimulatedRivianCar
+    self.simulated_car = SimulatedRivianCar()
     self.simulated_sensors = SimulatedSensors(self.dual_camera)
 
     self._exit_event = threading.Event()

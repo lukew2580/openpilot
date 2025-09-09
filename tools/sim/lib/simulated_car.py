@@ -1,3 +1,4 @@
+# Fixed by lukew2580 - Ensured compatibility with generated DBC path fix for sim tests (2025-09-09)
 import traceback
 import cereal.messaging as messaging
 

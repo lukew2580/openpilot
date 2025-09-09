@@ -1,3 +1,4 @@
+# Fixed by lukew2580 - Updated DBC path construction for subrepo compatibility (2025-09-09)
 import re
 import os
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ class DBC:
     if not os.path.exists(dbc_path):
       dbc_path = os.path.join(DBC_PATH, name + ".dbc")
 
+    dbc_path = os.path.join(os.path.dirname(__file__), '..', 'dbc', name + '.dbc')
     self._parse(dbc_path)
 
   def _parse(self, path: str):
